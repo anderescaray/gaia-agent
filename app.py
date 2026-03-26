@@ -3,12 +3,8 @@ import gradio as gr
 import requests
 import pandas as pd
 from dotenv import load_dotenv
-try:
-    from smolagents import CodeAgent, DuckDuckGoSearchTool, HfApiModel
-except ImportError:
-    # Si falla la anterior, es que está en el nuevo submódulo de modelos
-    from smolagents import CodeAgent, DuckDuckGoSearchTool
-    from smolagents.models import HfApiModel
+
+from smolagents import CodeAgent, DuckDuckGoSearchTool, LiteLLMModel
 
 # 1. CONFIGURATION
 load_dotenv()
@@ -16,9 +12,9 @@ hf_token = os.getenv("HF_TOKEN")
 
 # 2. CONFIGURATE THE AGENT (smolagents)
 # Use Qwen 2.5 Coder 32B for its great reasoning ability
-model = HfApiModel(
-    model_id="Qwen/Qwen2.5-Coder-32B-Instruct",
-    token=hf_token
+model = LiteLLMModel(
+    model_id="huggingface/Qwen/Qwen2.5-Coder-32B-Instruct", 
+    api_key=hf_token 
 )
 
 search_tool = DuckDuckGoSearchTool()
