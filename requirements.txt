@@ -4,6 +4,7 @@ smolagents>=1.1.0
 litellm
 duckduckgo-search
 ddgs
+markdownify
 python-dotenv
 pandas
 pillow

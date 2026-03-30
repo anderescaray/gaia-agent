@@ -1,143 +1,139 @@
 import os
+import pandas as pd
 import gradio as gr
 import requests
-import pandas as pd
 from dotenv import load_dotenv
+from smolagents import CodeAgent, DuckDuckGoSearchTool, LiteLLMModel, VisitWebpageTool
 
-from smolagents import CodeAgent, DuckDuckGoSearchTool, LiteLLMModel
-
-# 1. CONFIGURATION
+# --- Configuration & Environment ---
 load_dotenv()
-hf_token = os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-# 2. CONFIGURATE THE AGENT (smolagents)
-# Use Qwen 2.5 Coder 32B for its great reasoning ability
+# --- Model Initialization ---
+# Upgrading to 72B for superior reasoning capabilities on complex benchmarks
 model = LiteLLMModel(
-    model_id="huggingface/Qwen/Qwen2.5-Coder-32B-Instruct", 
-    api_key=hf_token 
+    model_id="huggingface/Qwen/Qwen2.5-72B-Instruct",
+    api_key=HF_TOKEN
 )
 
+# --- Toolset Definition ---
 search_tool = DuckDuckGoSearchTool()
+visit_page_tool = VisitWebpageTool()
 
-# Initialize the agent outside the class to optimize performance
+# --- Agent Core Logic ---
+# Implementing a CodeAgent with a high step limit to handle multi-layered GAIA tasks
+agent_system_prompt = """You are an advanced AI assistant specialized in solving the GAIA benchmark.
+Your goal is to provide precise, data-driven answers by following these principles:
+1. MULTI-STEP REASONING: Break down the question into logical sub-tasks.
+2. DEEP RESEARCH: Use 'search' to find sources and 'visit_webpage' to extract detailed information from specific URLs.
+3. DATA PROCESSING: Use Python code (pandas, math, re) to process any data or strings you find.
+4. FORMAT ADHERENCE: Your final answer must be extremely concise. Provide only the requested value (number, date, or name).
+5. VERIFICATION: Cross-reference facts if the first search result seems ambiguous.
+"""
+
 smol_agent = CodeAgent(
-    tools=[search_tool],
+    tools=[search_tool, visit_page_tool],
     model=model,
-    max_steps=10,
+    max_steps=15,  # Increased steps for complex reasoning trajectories
     verbosity_level=1,
-    additional_authorized_imports=["pandas", "numpy", "re", "math"]
+    additional_authorized_imports=["pandas", "numpy", "re", "math", "datetime", "statistics"],
+    system_prompt=agent_system_prompt
 )
 
-# 3. CONSTANTS AND CLASS
-DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
-
-class BasicAgent:
+class GAIAAssistant:
+    """Professional wrapper for the GAIA benchmark evaluation."""
+    
     def __init__(self):
-        print("--- smolagents agent initialized successfully ---")
+        print("GAIA Assistant specialized for high-accuracy retrieval initialized.")
 
     def __call__(self, question: str) -> str:
-        """
-        This function is called by the course evaluator.
-        """
-        print(f"\n[PROCESSING QUESTION]: {question[:100]}...")
+        print(f"\n[TASK RECEIVED]: {question[:120]}...")
         
-        # Prompt específico para que el agente sea muy directo (clave para GAIA)
-        prompt = f"""Solve the following question precisely. 
-        IMPORTANT: Your final answer must be extremely concise. 
-        If the answer is a number, date, or name, return ONLY that value. 
-        Do not include any conversational text or explanations.
-
-        Question: {question}"""
+        execution_prompt = (
+            f"Solve the following task using your tools and Python execution: {question}. "
+            f"Provide the final answer as concisely as possible."
+        )
         
         try:
-            # Ejecutamos la lógica de smolagents
-            result = smol_agent.run(prompt)
-            final_answer = str(result).strip()
-            print(f"[ANSWER GENERATED]: {final_answer}")
-            return final_answer
+            result = smol_agent.run(execution_prompt)
+            final_output = str(result).strip()
+            print(f"[TASK COMPLETED]: {final_output}")
+            return final_output
         except Exception as e:
-            print(f"Error in the agent: {e}")
-            return "Error processing the answer."
+            print(f"[EXECUTION ERROR]: {e}")
+            return "Execution Error"
 
-# 4. EVALUATION AND SUBMISSION LOGIC (Keeping the course's logic)
-def run_and_submit_all(profile: gr.OAuthProfile | None):
+# --- Course Evaluation Framework ---
+DEFAULT_API_URL = "https://agents-course-unit4-scoring.hf.space"
+
+def run_evaluation_suite(profile: gr.OAuthProfile | None):
     space_id = os.getenv("SPACE_ID")
 
     if not profile:
-        return "Please log in with Hugging Face using the button above.", None
+        return "Authentication required. Please log in via Hugging Face.", None
 
     username = profile.username
-    api_url = DEFAULT_API_URL
-    questions_url = f"{api_url}/questions"
-    submit_url = f"{api_url}/submit"
+    questions_url = f"{DEFAULT_API_URL}/questions"
+    submit_url = f"{DEFAULT_API_URL}/submit"
 
-    # Instantiate our agent
-    try:
-        agent = BasicAgent()
-    except Exception as e:
-        return f"Error initializing the agent: {e}", None
+    assistant = GAIAAssistant()
+    agent_code_link = f"https://huggingface.co/spaces/{space_id}/tree/main"
 
-    agent_code = f"https://huggingface.co/spaces/{space_id}/tree/main"
-
-    # Get questions
     try:
         response = requests.get(questions_url, timeout=15)
         response.raise_for_status()
-        questions_data = response.json()
+        questions = response.json()
     except Exception as e:
-        return f"Error getting questions: {e}", None
+        return f"Failed to retrieve questions: {e}", None
 
-    # Execute agent on all questions
-    results_log = []
-    answers_payload = []
-    for item in questions_data:
+    results = []
+    payload = []
+    
+    for item in questions:
         task_id = item.get("task_id")
-        question_text = item.get("question")
-        try:
-            answer = agent(question_text)
-            answers_payload.append({"task_id": task_id, "submitted_answer": answer})
-            results_log.append({"Task ID": task_id, "Question": question_text, "Answer": answer})
-        except Exception as e:
-            results_log.append({"Task ID": task_id, "Answer": f"ERROR: {e}"})
+        text = item.get("question")
+        
+        answer = assistant(text)
+        payload.append({"task_id": task_id, "submitted_answer": answer})
+        results.append({"Task ID": task_id, "Question": text, "Agent Answer": answer})
 
-    # Submit to scoring server
-    submission_data = {
+    submission = {
         "username": username,
-        "agent_code": agent_code,
-        "answers": answers_payload
+        "agent_code": agent_code_link,
+        "answers": payload
     }
 
     try:
-        response = requests.post(submit_url, json=submission_data, timeout=60)
-        response.raise_for_status()
-        result_data = response.json()
+        res = requests.post(submit_url, json=submission, timeout=60)
+        res.raise_for_status()
+        data = res.json()
         
-        status = (
-            f"✅ Submission successful!\n"
-            f"User: {result_data.get('username')}\n"
-            f"Score: {result_data.get('score')}% "
-            f"({result_data.get('correct_count')}/{result_data.get('total_attempted')} correct)\n"
-            f"Message: {result_data.get('message')}"
+        summary = (
+            f"✅ Submission Successful\n"
+            f"User: {data.get('username')}\n"
+            f"Global Score: {data.get('score')}% "
+            f"({data.get('correct_count')}/{data.get('total_attempted')} correct)\n"
+            f"Status: {data.get('message')}"
         )
-        return status, pd.DataFrame(results_log)
+        return summary, pd.DataFrame(results)
     except Exception as e:
-        return f"Error submitting: {e}", pd.DataFrame(results_log)
+        return f"Submission Failed: {e}", pd.DataFrame(results)
 
-# 5. GRADIO INTERFACE
-with gr.Blocks() as demo:
-    gr.Markdown("# 🤖 Final Agent - AI Agents Course")
-    gr.Markdown("Click the button to make the agent solve the GAIA benchmark and submit your score.")
+# --- Gradio UI Deployment ---
+with gr.Blocks(theme=gr.themes.Soft()) as interface:
+    gr.Markdown("# 🚀 Advanced GAIA Solver")
+    gr.Markdown("Autonomous agent specialized in high-precision information retrieval and data processing.")
     
     gr.LoginButton()
-    run_button = gr.Button("🚀 Run Evaluation and Submit All", variant="primary")
+    evaluate_btn = gr.Button("Execute Benchmark & Submit Score", variant="primary")
     
-    status_output = gr.Textbox(label="Submission Status", lines=5)
-    results_table = gr.DataFrame(label="Answer Details")
+    status_box = gr.Textbox(label="Evaluation Status", lines=4)
+    results_df = gr.DataFrame(label="Detailed Execution Log")
 
-    run_button.click(
-        fn=run_and_submit_all,
-        outputs=[status_output, results_table]
+    evaluate_btn.click(
+        fn=run_evaluation_suite,
+        outputs=[status_box, results_df]
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    interface.launch()
