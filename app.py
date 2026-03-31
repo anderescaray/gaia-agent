@@ -30,7 +30,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 GAIA_API_BASE = "https://agents-course-unit4-scoring.hf.space"
 
@@ -40,15 +40,15 @@ GAIA_API_BASE = "https://agents-course-unit4-scoring.hf.space"
 # ---------------------------------------------------------------------------
 
 def build_model() -> LiteLLMModel:
-    if not GROQ_API_KEY:
+    if not ANTHROPIC_API_KEY:
         raise EnvironmentError(
-            "GROQ_API_KEY is not set. "
+            "ANTHROPIC_API_KEY is not set. "
             "Add it to your HF Space secrets or .env file. "
         )
 
     return LiteLLMModel(
-        model_id="groq/llama-3.3-70b-versatile",
-        api_key=GROQ_API_KEY,
+        model_id="anthropic/claude-haiku-4-5-20251001",
+        api_key=ANTHROPIC_API_KEY,
     )
 
 
@@ -443,7 +443,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="GAIA Solver") as demo:
         # 🏅 GAIA Benchmark Solver
         **Hugging Face AI Agents Course — Unit 4**
 
-        **Before running:** make sure `GROQ_API_KEY` is set in your Space secrets.
+        **Before running:** make sure `ANTHROPIC_API_KEY` is set in your Space secrets.
         
         1. Log in below with your Hugging Face account
         2. Click **Run Benchmark**
