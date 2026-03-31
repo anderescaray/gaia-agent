@@ -67,7 +67,7 @@ agent = CodeAgent(
     model=model,
     max_steps=25, # GAIA requiere procesos largos de investigación
     verbosity_level=1,
-    additional_authorized_imports=["pandas", "numpy", "re", "math", "datetime", "collections", "pillow"]
+    additional_authorized_imports=["pandas", "numpy", "re", "math", "datetime", "collections", "PIL"]
 )
 
 class GAIASystem:
