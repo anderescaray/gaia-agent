@@ -1,30 +1,27 @@
 """
 GAIA Benchmark Solver — Hugging Face AI Agents Course (Unit 4)
 ==============================================================
-A multimodal agent capable of answering GAIA benchmark questions using
-web search, webpage visits, YouTube transcription, audio transcription,
-and attached file handling (CSV, images, PDFs, audio).
+Solves GAIA Level 1 questions using smolagents + Gemini.
 
-Architecture:
-    - Model  : Qwen/Qwen2.5-72B-Instruct via HF Inference (LiteLLM)
-    - Agent  : smolagents CodeAgent (code-first reasoning loop)
-    - Tools  : Search, Web, YouTube, Audio, File handling
-
-Author: <your-name>
+Setup (HF Space secrets):
+    GEMINI_API_KEY  — from aistudio.google.com (required)
+    HF_TOKEN           — your HF token (required for login/submission)
+    SPACE_ID           — automatically set by HF Spaces
 """
 
 import os
 import re
-import io
 import base64
-import requests
 import tempfile
 import traceback
 
+import requests
 import pandas as pd
 import gradio as gr
 from dotenv import load_dotenv
-from smolagents import CodeAgent, DuckDuckGoSearchTool, LiteLLMModel, VisitWebpageTool, Tool
+
+from smolagents import CodeAgent, LiteLLMModel, Tool
+from smolagents import DuckDuckGoSearchTool, VisitWebpageTool
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # ---------------------------------------------------------------------------
@@ -32,104 +29,185 @@ from youtube_transcript_api import YouTubeTranscriptApi
 # ---------------------------------------------------------------------------
 
 load_dotenv()
-HF_TOKEN = os.getenv("HF_TOKEN")
 
-# Base URL for the GAIA scoring API
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+HF_TOKEN = os.getenv("HF_TOKEN")
 GAIA_API_BASE = "https://agents-course-unit4-scoring.hf.space"
 
+
 # ---------------------------------------------------------------------------
-# Model — Use a reliable HF Inference endpoint
+# Model — Claude via LiteLLM (reliable, fast, cheap)
 # ---------------------------------------------------------------------------
 
 def build_model() -> LiteLLMModel:
-    """
-    Instantiate the LLM backend.
-
-    Qwen2.5-72B-Instruct is strong for multi-step reasoning.
-    Falls back gracefully if the token is missing.
-    """
-    if not HF_TOKEN:
-        raise EnvironmentError("HF_TOKEN is not set. Add it to your .env or HF Space secrets.")
+    if not GEMINI_API_KEY:
+        raise EnvironmentError(
+            "GEMINI_API_KEY is not set. "
+            "Add it to your HF Space secrets or .env file. "
+            "Get a key at https://aistudio.google.com"
+        )
 
     return LiteLLMModel(
-        model_id="huggingface/Qwen/Qwen2.5-72B-Instruct",
-        api_key=HF_TOKEN,
-        # Increase timeout — GAIA tasks can require long web browsing chains
-        timeout=120,
+        model_id="gemini/gemini-2.0-flash",
+        api_key=GEMINI_API_KEY,
     )
 
 
 # ---------------------------------------------------------------------------
-# Custom Tools
+# Tools
 # ---------------------------------------------------------------------------
+
+class DownloadTaskFileTool(Tool):
+    """
+    Downloads the file attached to a GAIA task from the scoring API.
+
+    Text-based files (CSV, JSON, TXT) are returned as decoded strings.
+    Binary files (audio, images) are saved to a temp path and the path
+    is returned so other tools can process them.
+
+    Endpoint: GET {GAIA_API_BASE}/files/{task_id}
+    """
+
+    name = "download_task_file"
+    description = (
+        "Downloads the file attached to the current GAIA task and returns its contents. "
+        "For CSV/JSON/TXT returns the text directly. "
+        "For audio/image files, saves to disk and returns the local path. "
+        "Call this FIRST whenever the question mentions 'the file', 'the image', "
+        "'the audio', 'attached', etc."
+    )
+    inputs = {
+        "task_id": {
+            "type": "string",
+            "description": "The GAIA task UUID whose file should be downloaded.",
+        }
+    }
+    output_type = "string"
+
+    _TEXT_EXTS = {".csv", ".txt", ".json", ".tsv", ".md", ".xml", ".html"}
+    _AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+
+    def forward(self, task_id: str) -> str:
+        url = f"{GAIA_API_BASE}/files/{task_id}"
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+        except Exception as exc:
+            return f"[DownloadTaskFileTool ERROR] {exc}"
+
+        # Detect filename / extension
+        content_disp = r.headers.get("Content-Disposition", "")
+        content_type = r.headers.get("Content-Type", "")
+
+        filename = ""
+        if "filename=" in content_disp:
+            filename = content_disp.split("filename=")[-1].strip().strip('"')
+
+        ext = os.path.splitext(filename)[-1].lower()
+
+        # Infer from MIME if extension is missing
+        if not ext:
+            mime_map = {
+                "csv": ".csv", "json": ".json", "text": ".txt",
+                "mpeg": ".mp3", "audio": ".mp3",
+                "png": ".png", "jpeg": ".jpg", "image": ".png",
+            }
+            for key, val in mime_map.items():
+                if key in content_type:
+                    ext = val
+                    break
+
+        # Text files — return content directly
+        if ext in self._TEXT_EXTS:
+            try:
+                return r.content.decode("utf-8")
+            except UnicodeDecodeError:
+                return r.content.decode("latin-1")
+
+        # Binary files — save and return path
+        suffix = ext or ".bin"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(r.content)
+            local_path = tmp.name
+
+        if ext in self._AUDIO_EXTS:
+            return (
+                f"Audio file saved to: {local_path}\n"
+                f"Pass this path to transcribe_audio to get the text."
+            )
+        if ext in self._IMAGE_EXTS:
+            return (
+                f"Image file saved to: {local_path}\n"
+                f"Describe the image content to answer the question."
+            )
+        return f"File saved to: {local_path} (type: {ext or 'unknown'})"
+
 
 class AudioTranscriptionTool(Tool):
     """
-    Transcribes audio files (mp3, wav, m4a) using OpenAI Whisper (base model).
-
-    Accepts either a local filesystem path or a remote URL.
-    Downloads remote files to a temp directory before transcription.
+    Transcribes audio files using OpenAI Whisper (base model).
+    Accepts a local path or an HTTPS URL.
+    Downloads remote URLs before transcription.
     """
 
     name = "transcribe_audio"
     description = (
-        "Transcribes an audio file and returns its full text. "
-        "Accepts a local path or a direct download URL. "
-        "Use this whenever a question involves an audio or mp3 file."
+        "Transcribes an audio file (mp3, wav, m4a) and returns the full text. "
+        "Accepts a local filesystem path or a direct download URL. "
+        "Use this whenever a question involves an audio file."
     )
     inputs = {
         "audio_path": {
             "type": "string",
-            "description": "Local file path or HTTP/HTTPS URL pointing to the audio file.",
+            "description": "Local file path or HTTP/HTTPS URL to the audio file.",
         }
     }
     output_type = "string"
 
     def forward(self, audio_path: str) -> str:
-        # Lazy-import Whisper to avoid slow startup when the tool is not used
         try:
             import whisper  # noqa: PLC0415
         except ImportError:
-            return "Whisper is not installed. Run: pip install openai-whisper"
+            return "Whisper not installed. Run: pip install openai-whisper"
+
+        local_path = audio_path
+
+        # Download if URL
+        if audio_path.startswith("http://") or audio_path.startswith("https://"):
+            try:
+                r = requests.get(audio_path, timeout=60)
+                r.raise_for_status()
+                suffix = os.path.splitext(audio_path.split("?")[0])[-1] or ".mp3"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                    tmp.write(r.content)
+                    local_path = tmp.name
+            except Exception as exc:
+                return f"[AudioTranscriptionTool] Download failed: {exc}"
 
         try:
-            local_path = audio_path
-
-            # Download if URL
-            if audio_path.startswith("http://") or audio_path.startswith("https://"):
-                response = requests.get(audio_path, timeout=60)
-                response.raise_for_status()
-
-                suffix = os.path.splitext(audio_path)[-1] or ".mp3"
-                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                    tmp.write(response.content)
-                    local_path = tmp.name
-
-            model_whisper = whisper.load_model("base")
-            result = model_whisper.transcribe(local_path)
+            model_w = whisper.load_model("base")
+            result = model_w.transcribe(local_path)
             return result["text"].strip()
-
         except Exception as exc:
-            return f"[AudioTranscriptionTool] Failed: {exc}"
+            return f"[AudioTranscriptionTool] Transcription failed: {exc}"
 
 
 class YouTubeTranscriptTool(Tool):
     """
-    Retrieves the full transcript of a YouTube video.
-
-    Uses youtube-transcript-api; no browser or cookies required.
-    Prefers English captions but falls back to any available language.
+    Fetches the full text transcript of a YouTube video.
+    Prefers English captions; falls back to any available language.
     """
 
     name = "get_youtube_transcript"
     description = (
-        "Fetches the full text transcript of a YouTube video given its URL or video ID. "
-        "Use this for questions that reference a YouTube link."
+        "Fetches the complete transcript of a YouTube video given its URL or video ID. "
+        "Use this immediately whenever a question contains a YouTube link."
     )
     inputs = {
         "url": {
             "type": "string",
-            "description": "Full YouTube URL (e.g. https://www.youtube.com/watch?v=...) or bare video ID.",
+            "description": "Full YouTube URL or bare video ID.",
         }
     }
     output_type = "string"
@@ -143,124 +221,38 @@ class YouTubeTranscriptTool(Tool):
             video_id = url.split("youtu.be/")[-1].split("?")[0]
 
         try:
-            # Try English first, then any available language
             try:
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
+                entries = YouTubeTranscriptApi.get_transcript(video_id, languages=["en"])
             except Exception:
-                transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-
-            return " ".join(entry["text"] for entry in transcript_list)
-
+                entries = YouTubeTranscriptApi.get_transcript(video_id)
+            return " ".join(e["text"] for e in entries)
         except Exception as exc:
             return (
-                f"[YouTubeTranscriptTool] Could not retrieve transcript for '{video_id}': {exc}. "
-                "Try searching the web for a summary of this video."
+                f"[YouTubeTranscriptTool] Could not get transcript for '{video_id}': {exc}. "
+                "Try searching the web for a summary of this video instead."
             )
 
 
-class DownloadFileTool(Tool):
-    """
-    Downloads a file attached to a GAIA question from the scoring API
-    and returns its content as text (for CSV/JSON/TXT) or a local path (for binary files).
-
-    The GAIA API exposes attached files at:
-        GET {GAIA_API_BASE}/files/{task_id}
-    """
-
-    name = "download_task_file"
-    description = (
-        "Downloads the file attached to the current GAIA task and returns its content. "
-        "For spreadsheets and text files, returns the raw text. "
-        "For images or audio, saves to disk and returns the local path so other tools can process it. "
-        "Use this whenever the question mentions 'the attached file', 'the file', 'the image', 'the audio', etc."
-    )
-    inputs = {
-        "task_id": {
-            "type": "string",
-            "description": "The GAIA task ID (UUID) whose attached file should be downloaded.",
-        }
-    }
-    output_type = "string"
-
-    TEXT_EXTENSIONS = {".csv", ".txt", ".json", ".md", ".tsv", ".xml", ".html"}
-    IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
-    AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
-
-    def forward(self, task_id: str) -> str:
-        url = f"{GAIA_API_BASE}/files/{task_id}"
-        try:
-            response = requests.get(url, timeout=60)
-            response.raise_for_status()
-
-            # Determine file type from Content-Disposition or Content-Type
-            content_disp = response.headers.get("Content-Disposition", "")
-            content_type = response.headers.get("Content-Type", "")
-
-            # Try to parse filename from header
-            filename = ""
-            if "filename=" in content_disp:
-                filename = content_disp.split("filename=")[-1].strip().strip('"')
-
-            ext = os.path.splitext(filename)[-1].lower() if filename else ""
-
-            # Infer extension from MIME type if not available
-            if not ext:
-                if "csv" in content_type:
-                    ext = ".csv"
-                elif "image" in content_type:
-                    ext = ".png"
-                elif "audio" in content_type or "mpeg" in content_type:
-                    ext = ".mp3"
-                elif "json" in content_type:
-                    ext = ".json"
-                elif "text" in content_type:
-                    ext = ".txt"
-
-            # --- Text/data files: return content directly ---
-            if ext in self.TEXT_EXTENSIONS:
-                try:
-                    return response.content.decode("utf-8")
-                except UnicodeDecodeError:
-                    return response.content.decode("latin-1")
-
-            # --- Binary files: save to disk and return path ---
-            suffix = ext or ".bin"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-                tmp.write(response.content)
-                local_path = tmp.name
-
-            if ext in self.IMAGE_EXTENSIONS:
-                return f"[Image saved to {local_path}] Use vision capabilities or describe the image."
-            if ext in self.AUDIO_EXTENSIONS:
-                return f"[Audio saved to {local_path}] Pass this path to transcribe_audio."
-
-            return f"[File saved to {local_path}] Extension: {ext}"
-
-        except Exception as exc:
-            return f"[DownloadFileTool] Failed to download file for task '{task_id}': {exc}"
-
-
 # ---------------------------------------------------------------------------
-# Agent System Prompt
+# System Prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """
-You are an expert research agent solving GAIA benchmark questions.
-Your goal is to return the EXACT correct answer — no explanations, no preamble.
+# This prompt is injected as agent instructions — NOT prepended to each question.
+# smolagents CodeAgent accepts it via the `system_prompt` kwarg on CodeAgent
+# or via the managed_agents approach. Here we inject it into the task context.
 
-RULES:
-1. OUTPUT FORMAT: Return only the raw answer. If the answer is "42", output "42".
-   Do NOT say "The answer is 42" or "Based on my research, 42".
-2. LISTS: Sort alphabetically unless the question specifies another order. Use comma+space separation.
-3. NUMBERS: Use the exact precision the question implies. Do not round unless asked.
-4. SCIENCE: In botanical classification, tomatoes, peppers, cucumbers, and corn kernels are FRUITS.
-   Only use "vegetable" if the question explicitly asks about culinary usage.
-5. FILES: If the question references an attached file, ALWAYS call download_task_file first.
-6. AUDIO: If the question involves an mp3 or audio, call transcribe_audio on the file path.
-7. YOUTUBE: If the question contains a YouTube URL, call get_youtube_transcript immediately.
-8. WEB SEARCH: If you need external data, search before answering. Verify facts from at least 2 sources.
-9. MULTI-STEP: Break the problem into steps. Execute code to verify calculations. Never guess.
-10. DATES: Use ISO 8601 format (YYYY-MM-DD) unless the question specifies another format.
+ANSWER_RULES = """
+ANSWER FORMAT RULES (follow strictly — answers are scored by exact match):
+- Return ONLY the raw answer. No explanation, no preamble, no punctuation added.
+- WRONG: "The answer is 4"   RIGHT: "4"
+- WRONG: "Based on research: Paris"   RIGHT: "Paris"
+- Lists → alphabetical order, comma-separated, e.g. "apple, banana, cherry"
+- Numbers → no trailing zeros unless significant; no thousands separators unless asked
+- Dates → use the format the question implies; default ISO: YYYY-MM-DD
+- Botany rule: tomatoes, peppers, cucumbers, avocados, corn kernels = FRUITS
+  Only say "vegetable" if the question explicitly asks about culinary context
+- Reversed text questions: decode the reversal, answer the actual question
+- For YES/NO questions: answer exactly "Yes" or "No"
 """
 
 
@@ -270,215 +262,203 @@ RULES:
 
 class GAIASolver:
     """
-    Orchestrates the smolagents CodeAgent to solve GAIA benchmark tasks.
+    Wraps a smolagents CodeAgent to solve GAIA benchmark tasks.
 
-    Each task may include:
-    - A natural language question
-    - An optional attached file (image, audio, CSV, etc.)
-
-    The solver injects the task_id into the question context so the agent
-    can call download_task_file when needed.
+    Each task dict contains:
+        task_id   : str  — UUID used to fetch attached files
+        question  : str  — The question to answer
+        file_name : str  — Optional filename hint (may be empty)
     """
 
     def __init__(self, model: LiteLLMModel):
-        self.tools = [
-            DuckDuckGoSearchTool(),
-            VisitWebpageTool(),
-            YouTubeTranscriptTool(),
-            AudioTranscriptionTool(),
-            DownloadFileTool(),
-        ]
         self.agent = CodeAgent(
-            tools=self.tools,
+            tools=[
+                DuckDuckGoSearchTool(),
+                VisitWebpageTool(),
+                YouTubeTranscriptTool(),
+                AudioTranscriptionTool(),
+                DownloadTaskFileTool(),
+            ],
             model=model,
-            # GAIA tasks can require deep research chains — allow enough steps
-            max_steps=20,
+            max_steps=15,
             verbosity_level=1,
             additional_authorized_imports=[
                 "pandas", "numpy", "re", "math", "datetime",
-                "collections", "json", "csv", "itertools",
+                "collections", "json", "csv", "itertools", "string",
             ],
         )
 
     def solve(self, task: dict) -> str:
-        """
-        Solve a single GAIA task dict containing 'task_id', 'question',
-        and optionally 'file_name'.
-
-        Returns the cleaned answer string.
-        """
+        """Solve one GAIA task and return a clean answer string."""
         task_id = task.get("task_id", "")
         question = task.get("question", "")
         file_name = task.get("file_name", "")
 
-        # Build a context-rich prompt for the agent
-        context_lines = [f"Task ID: {task_id}"]
+        # Build the full prompt sent to the agent
+        lines = [ANSWER_RULES, "---"]
+        lines.append(f"Task ID: {task_id}")
         if file_name:
-            context_lines.append(
-                f"Attached file: '{file_name}' — call download_task_file(task_id='{task_id}') to access it."
+            lines.append(
+                f"This task has an attached file: '{file_name}'. "
+                f"Call download_task_file(task_id='{task_id}') to access it BEFORE answering."
             )
-        context_lines.append(f"\nQuestion: {question}")
-        full_prompt = "\n".join(context_lines)
+        lines.append(f"\nQuestion: {question}")
+        prompt = "\n".join(lines)
 
         try:
-            raw_answer = self.agent.run(full_prompt, reset=True)
-            return self._clean_answer(str(raw_answer))
+            # reset=True is critical — prevents state leaking between questions
+            raw = self.agent.run(prompt, reset=True)
+            return self._clean(str(raw))
         except Exception as exc:
-            print(f"[ERROR] Task {task_id} failed: {exc}")
+            print(f"[ERROR] Task {task_id}: {exc}")
             traceback.print_exc()
             return ""
 
     @staticmethod
-    def _clean_answer(raw: str) -> str:
+    def _clean(raw: str) -> str:
         """
-        Strip common LLM verbosity patterns that violate GAIA's exact-match scoring.
-        Conservative cleaning — only removes clear preamble patterns.
+        Minimal cleanup of LLM output.
+        Only strips patterns that are unambiguously wrong for exact-match scoring.
         """
-        cleaned = raw.strip()
+        s = raw.strip()
 
-        # Remove markdown code fences if the entire answer is wrapped
-        if cleaned.startswith("```") and cleaned.endswith("```"):
-            cleaned = cleaned[3:-3].strip()
-            if cleaned.startswith(("python", "text", "json")):
-                cleaned = cleaned.split("\n", 1)[-1].strip()
+        # Strip markdown code fences wrapping the whole answer
+        if s.startswith("```") and s.endswith("```"):
+            inner = s[3:-3].strip()
+            # Remove language hint on first line (e.g. ```python)
+            first_line, _, rest = inner.partition("\n")
+            s = rest.strip() if first_line.isalpha() else inner
 
-        # Remove explicit "The answer is:" type prefixes
-        preamble_pattern = re.compile(
-            r"^\s*(the\s+)?(final\s+)?(answer\s+is[:\s]*|result[:\s]*|value[:\s]*)",
-            re.IGNORECASE,
-        )
-        cleaned = preamble_pattern.sub("", cleaned).strip()
+        # Strip explicit "The answer is / Final answer:" prefixes (case-insensitive)
+        s = re.sub(
+            r"^\s*(the\s+)?(final\s+)?(answer\s+(is|:)|result\s*:|value\s*:)\s*",
+            "",
+            s,
+            flags=re.IGNORECASE,
+        ).strip()
 
-        # Remove surrounding quotes only if symmetrically present
-        if (cleaned.startswith('"') and cleaned.endswith('"')) or \
-           (cleaned.startswith("'") and cleaned.endswith("'")):
-            cleaned = cleaned[1:-1].strip()
+        # Strip symmetric surrounding quotes
+        for q in ('"', "'"):
+            if s.startswith(q) and s.endswith(q) and len(s) > 1:
+                s = s[1:-1].strip()
+                break
 
-        return cleaned
+        return s
 
 
 # ---------------------------------------------------------------------------
-# Gradio UI & Benchmark Runner
+# API helpers
 # ---------------------------------------------------------------------------
 
 def fetch_questions() -> list[dict]:
-    """Fetch all questions from the GAIA scoring API."""
-    response = requests.get(f"{GAIA_API_BASE}/questions", timeout=30)
-    response.raise_for_status()
-    return response.json()
+    r = requests.get(f"{GAIA_API_BASE}/questions", timeout=30)
+    r.raise_for_status()
+    return r.json()
 
 
 def submit_answers(username: str, space_id: str, answers: list[dict]) -> dict:
-    """Submit answers to the GAIA scoring API and return the result."""
     payload = {
         "username": username,
         "agent_code": f"https://huggingface.co/spaces/{space_id}/tree/main",
         "answers": answers,
     }
-    response = requests.post(f"{GAIA_API_BASE}/submit", json=payload, timeout=60)
-    response.raise_for_status()
-    return response.json()
+    r = requests.post(f"{GAIA_API_BASE}/submit", json=payload, timeout=60)
+    r.raise_for_status()
+    return r.json()
 
+
+# ---------------------------------------------------------------------------
+# Gradio runner
+# ---------------------------------------------------------------------------
 
 def run_benchmark(profile: gr.OAuthProfile | None) -> tuple[str, pd.DataFrame | None]:
     """
-    Main benchmark runner invoked by the Gradio button.
-
-    1. Validates the user is logged in via HF OAuth
-    2. Fetches questions from the GAIA API
-    3. Solves each question with the agent
-    4. Submits answers and displays the score
+    Orchestrates the full benchmark run:
+      1. Validate login
+      2. Build model + solver
+      3. Fetch questions
+      4. Solve each question
+      5. Submit and display score
     """
     if profile is None:
-        return "⚠️ Please log in with your Hugging Face account first.", None
+        return "⚠️  Please log in with your Hugging Face account first.", None
 
     username = profile.username
     space_id = os.getenv("SPACE_ID", "")
 
-    status_log: list[str] = [f"🔐 Logged in as: {username}"]
+    print(f"Starting benchmark for user: {username}")
 
-    # --- Build model & solver ---
+    # Build model & solver
     try:
         model = build_model()
         solver = GAIASolver(model)
     except EnvironmentError as exc:
-        return str(exc), None
+        return f"❌ Configuration error: {exc}", None
 
-    # --- Fetch questions ---
+    # Fetch questions
     try:
         questions = fetch_questions()
-        status_log.append(f"📋 Fetched {len(questions)} questions.")
+        print(f"Fetched {len(questions)} questions.")
     except Exception as exc:
         return f"❌ Failed to fetch questions: {exc}", None
 
-    # --- Solve ---
+    # Solve
     submissions: list[dict] = []
-    results_rows: list[dict] = []
+    rows: list[dict] = []
 
     for i, task in enumerate(questions, start=1):
-        task_id = task.get("task_id", f"task_{i}")
-        question_preview = task.get("question", "")[:80]
-        print(f"\n[{i}/{len(questions)}] Solving task {task_id}: {question_preview}...")
+        tid = task.get("task_id", f"task_{i}")
+        q_preview = task.get("question", "")[:80]
+        print(f"\n[{i:02d}/{len(questions)}] {tid}: {q_preview}...")
 
         answer = solver.solve(task)
-        submissions.append({"task_id": task_id, "submitted_answer": answer})
-        results_rows.append({
-            "Task ID": task_id,
-            "Question (preview)": task.get("question", "")[:120],
-            "File": task.get("file_name", ""),
-            "Submitted Answer": answer,
+        print(f"  → Answer: {answer!r}")
+
+        submissions.append({"task_id": tid, "submitted_answer": answer})
+        rows.append({
+            "Task ID": tid,
+            "Question": task.get("question", "")[:120],
+            "File": task.get("file_name", "") or "—",
+            "Answer": answer or "(empty)",
         })
 
-    # --- Submit ---
+    # Submit
     try:
         result = submit_answers(username, space_id, submissions)
         score = result.get("score", "N/A")
         message = result.get("message", "")
-        status = f"✅ Submission complete — Score: {score}%\n{message}"
+        status = f"✅ Score: {score}%\n{message}"
     except Exception as exc:
-        status = f"⚠️ Submission failed: {exc}\nAnswers were generated but not submitted."
+        status = f"⚠️  Submission failed: {exc}"
 
-    return status, pd.DataFrame(results_rows)
+    return status, pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
-# Gradio App
+# Gradio UI
 # ---------------------------------------------------------------------------
 
-with gr.Blocks(theme=gr.themes.Soft(), title="GAIA Benchmark Solver") as demo:
+with gr.Blocks(theme=gr.themes.Soft(), title="GAIA Solver") as demo:
     gr.Markdown(
         """
         # 🏅 GAIA Benchmark Solver
-        **Hugging Face AI Agents Course — Unit 4 Final Assignment**
+        **Hugging Face AI Agents Course — Unit 4**
 
-        This agent uses web search, file handling, YouTube transcription, and audio transcription
-        to solve [GAIA benchmark](https://huggingface.co/datasets/gaia-benchmark/GAIA) questions.
-
-        **Instructions:**
-        1. Log in with your Hugging Face account below.
-        2. Click **Run Benchmark** to start solving all questions.
-        3. Results and your score will appear automatically.
+        **Before running:** make sure `ANTHROPIC_API_KEY` is set in your Space secrets.
+        
+        1. Log in below with your Hugging Face account
+        2. Click **Run Benchmark**
+        3. Wait ~5–10 min for all 20 questions to be solved and submitted
         """
     )
 
     gr.LoginButton()
+    btn = gr.Button("🚀 Run Benchmark", variant="primary", size="lg")
+    status_box = gr.Textbox(label="Result", lines=4)
+    table = gr.DataFrame(label="Answers", wrap=True)
 
-    run_btn = gr.Button("🚀 Run Full Benchmark", variant="primary", size="lg")
-    status_box = gr.Textbox(
-        label="Submission Status",
-        lines=4,
-        placeholder="Results will appear here after the benchmark completes...",
-    )
-    results_table = gr.DataFrame(label="Task Results", wrap=True)
+    btn.click(fn=run_benchmark, outputs=[status_box, table])
 
-    run_btn.click(
-        fn=run_benchmark,
-        outputs=[status_box, results_table],
-    )
-
-# ---------------------------------------------------------------------------
-# Entry Point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     demo.launch()
