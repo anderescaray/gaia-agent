@@ -6,6 +6,7 @@ duckduckgo-search
 ddgs
 markdownify
 youtube-transcript-api
+opencv-python
 python-dotenv
 pandas
 pillow
