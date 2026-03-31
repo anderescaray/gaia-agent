@@ -1,15 +1,35 @@
+# Core agent framework
 smolagents>=1.1.0
-litellm
-duckduckgo-search
+
+# LLM routing (HF Inference via LiteLLM)
+litellm>=1.40.0
+
+# Web tools
+duckduckgo-search>=6.0.0
 ddgs
-markdownify
-youtube-transcript-api
-openai-whisper
-librosa
-torch
+markdownify>=0.12.0
+requests>=2.31.0
+
+# YouTube transcript extraction
+youtube-transcript-api>=0.6.2
+
+# Audio transcription
+openai-whisper>=20231117
+
+# Audio processing (required by Whisper)
+librosa>=0.10.0
+torch>=2.0.0
 torchvision
-pillow
-pandas
-gradio
-requests
-python-dotenv
+
+# Data handling
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Image handling
+pillow>=10.0.0
+
+# UI
+gradio>=4.40.0
+
+# Environment
+python-dotenv>=1.0.0
