@@ -10,9 +10,9 @@ load_dotenv()
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 # --- Model Initialization ---
-# Upgrading to 72B for superior reasoning capabilities on complex benchmarks
+# Using Qwen2.5-Coder-32B for its specialized ability to write and execute Python code
 model = LiteLLMModel(
-    model_id="huggingface/Qwen/Qwen2.5-72B-Instruct",
+    model_id="huggingface/Qwen/Qwen2.5-Coder-32B-Instruct",
     api_key=HF_TOKEN
 )
 
@@ -21,41 +21,34 @@ search_tool = DuckDuckGoSearchTool()
 visit_page_tool = VisitWebpageTool()
 
 # --- Agent Core Logic ---
-# Implementing a CodeAgent with a high step limit to handle multi-layered GAIA tasks
-agent_system_prompt = """You are an advanced AI assistant specialized in solving the GAIA benchmark.
-Your goal is to provide precise, data-driven answers by following these principles:
-1. MULTI-STEP REASONING: Break down the question into logical sub-tasks.
-2. DEEP RESEARCH: Use 'search' to find sources and 'visit_webpage' to extract detailed information from specific URLs.
-3. DATA PROCESSING: Use Python code (pandas, math, re) to process any data or strings you find.
-4. FORMAT ADHERENCE: Your final answer must be extremely concise. Provide only the requested value (number, date, or name).
-5. VERIFICATION: Cross-reference facts if the first search result seems ambiguous.
-"""
-
+# Note: system_prompt is removed from __init__ to ensure compatibility with smolagents v1.1.0+
 smol_agent = CodeAgent(
     tools=[search_tool, visit_page_tool],
     model=model,
-    max_steps=15,  # Increased steps for complex reasoning trajectories
+    max_steps=15,
     verbosity_level=1,
-    additional_authorized_imports=["pandas", "numpy", "re", "math", "datetime", "statistics"],
-    system_prompt=agent_system_prompt
+    additional_authorized_imports=["pandas", "numpy", "re", "math", "datetime", "statistics"]
 )
 
 class GAIAAssistant:
     """Professional wrapper for the GAIA benchmark evaluation."""
     
     def __init__(self):
-        print("GAIA Assistant specialized for high-accuracy retrieval initialized.")
+        # We define the personality here to keep the code clean and modular
+        self.system_instructions = (
+            "You are an expert AI researcher. Solve the task step-by-step.\n"
+            "1. Search for info. 2. Use 'visit_webpage' for deep reading if needed.\n"
+            "3. Use Python to process data. 4. Output ONLY the final concise answer.\n"
+        )
 
     def __call__(self, question: str) -> str:
         print(f"\n[TASK RECEIVED]: {question[:120]}...")
         
-        execution_prompt = (
-            f"Solve the following task using your tools and Python execution: {question}. "
-            f"Provide the final answer as concisely as possible."
-        )
+        # We prepend the instructions to the user question
+        full_task = f"{self.system_instructions}\nTask: {question}"
         
         try:
-            result = smol_agent.run(execution_prompt)
+            result = smol_agent.run(full_task)
             final_output = str(result).strip()
             print(f"[TASK COMPLETED]: {final_output}")
             return final_output
