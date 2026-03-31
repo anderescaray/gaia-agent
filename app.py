@@ -1,10 +1,10 @@
 """
 GAIA Benchmark Solver — Hugging Face AI Agents Course (Unit 4)
 ==============================================================
-Solves GAIA Level 1 questions using smolagents + Gemini.
+Solves GAIA Level 1 questions using smolagents
 
 Setup (HF Space secrets):
-    GEMINI_API_KEY  — from aistudio.google.com (required)
+    GROQ_API_KEY  —(required)
     HF_TOKEN           — your HF token (required for login/submission)
     SPACE_ID           — automatically set by HF Spaces
 """
@@ -30,7 +30,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 HF_TOKEN = os.getenv("HF_TOKEN")
 GAIA_API_BASE = "https://agents-course-unit4-scoring.hf.space"
 
@@ -40,16 +40,15 @@ GAIA_API_BASE = "https://agents-course-unit4-scoring.hf.space"
 # ---------------------------------------------------------------------------
 
 def build_model() -> LiteLLMModel:
-    if not GEMINI_API_KEY:
+    if not GROQ_API_KEY:
         raise EnvironmentError(
-            "GEMINI_API_KEY is not set. "
+            "GROQ_API_KEY is not set. "
             "Add it to your HF Space secrets or .env file. "
-            "Get a key at https://aistudio.google.com"
         )
 
     return LiteLLMModel(
-        model_id="gemini/gemini-2.0-flash",
-        api_key=GEMINI_API_KEY,
+        model_id="groq/llama-3.3-70b-versatile",
+        api_key=GROQ_API_KEY,
     )
 
 
@@ -444,7 +443,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="GAIA Solver") as demo:
         # 🏅 GAIA Benchmark Solver
         **Hugging Face AI Agents Course — Unit 4**
 
-        **Before running:** make sure `ANTHROPIC_API_KEY` is set in your Space secrets.
+        **Before running:** make sure `GROQ_API_KEY` is set in your Space secrets.
         
         1. Log in below with your Hugging Face account
         2. Click **Run Benchmark**
